@@ -1,1 +1,142 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sheriff Robot View</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#080d12;color:#00ff88;font-family:Consolas,monospace}
+header{padding:18px;text-align:center;border-bottom:1px solid #174a39;background:#0b1516}
+h1{margin:0 0 8px;font-size:25px;letter-spacing:2px}
+.subtitle{color:#8ab9a7;font-size:12px}
+main{max-width:1000px;padding:18px;margin:auto}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+button{padding:11px 18px;background:#123b2d;border:1px solid #00ff88;color:#00ff88;cursor:pointer;font-weight:bold;border-radius:5px}
+button:disabled{opacity:.5;cursor:not-allowed}
+#status{color:#b8d5c8;margin:12px 0;font-size:13px}
+.screen{position:relative;width:100%;overflow:hidden;background:#000;border:1px solid #00ff88;border-radius:8px;line-height:0}
+video{display:block;width:100%;height:auto;transform:scaleX(-1)}
+canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.coordinates{position:absolute;z-index:2;top:18px;left:15px;padding:12px;min-width:165px;line-height:1.9;font-size:15px;color:#00ff88;background:rgba(0,15,10,.82);border-left:3px solid #00ff88;pointer-events:none}
+#warning{color:#00ff88;font-weight:bold}
+.note{margin-top:14px;padding:12px;border:1px solid #23483a;color:#b8d5c8;font-size:12px;line-height:1.7}
+@media(max-width:550px){main{padding:10px}.coordinates{top:8px;left:8px;padding:6px;min-width:125px;font-size:11px}}
+</style>
+</head>
+<body>
+<header><h1>SHERIFF ROBOT VIEW</h1><div class="subtitle">AI FACE DETECTION SYSTEM // LIVE CAMERA</div></header>
+<main>
+<div class="toolbar"><button id="startBtn">CAMERA START</button><button id="stopBtn" disabled>CAMERA STOP</button></div>
+<div id="status">시작 버튼을 누르세요.</div>
+<div class="screen">
+<video id="video" autoplay muted playsinline></video>
+<canvas id="overlay"></canvas>
+<div class="coordinates"><div id="xText">X: --</div><div id="yText">Y: --</div><div id="zText">Z: --</div><div id="warning">SYSTEM READY</div></div>
+</div>
+<div class="note">X: 화면 중심 기준 좌우 위치 · Y: 화면 중심 기준 상하 위치<br>Z: 얼굴 크기로 추정한 거리 · 가까우면 빨간색 경고<br>좌표와 거리는 보정되지 않은 추정값입니다.</div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<script>
+const video=document.getElementById("video");
+const canvas=document.getElementById("overlay");
+const ctx=canvas.getContext("2d");
+const startBtn=document.getElementById("startBtn");
+const stopBtn=document.getElementById("stopBtn");
+const statusText=document.getElementById("status");
+const xText=document.getElementById("xText");
+const yText=document.getElementById("yText");
+const zText=document.getElementById("zText");
+const warning=document.getElementById("warning");
+const MODEL_URL="https://justadudewhohacks.github.io/face-api.js/weights";
+const WARN_RATIO=0.35;
+const FACE_WIDTH_CM=16;
+const FOCAL_LENGTH_AT_640=600;
+let stream=null,running=false,busy=false,generation=0;
 
+function resetCoordinates(){
+  xText.textContent="X: --";yText.textContent="Y: --";zText.textContent="Z: --";
+  warning.textContent="NO FACE";warning.style.color="#00ff88";
+}
+function setCanvasSize(){
+  if(!video.videoWidth||!video.videoHeight)return;
+  canvas.width=video.videoWidth;canvas.height=video.videoHeight;
+}
+async function startCamera(){
+  if(running)return;
+  const currentGeneration=++generation;
+  startBtn.disabled=true;
+  try{
+    statusText.textContent="얼굴 인식 모델을 불러오는 중...";
+    if(!window.faceapi)throw new Error("얼굴 인식 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인하세요.");
+    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+    if(currentGeneration!==generation)return;
+    statusText.textContent="카메라 권한을 요청하는 중...";
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("이 브라우저에서 카메라를 사용할 수 없습니다. HTTPS 주소로 접속하세요.");
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:640},height:{ideal:480}},audio:false});
+    if(currentGeneration!==generation){stream.getTracks().forEach(track=>track.stop());return;}
+    video.srcObject=stream;await video.play();setCanvasSize();
+    running=true;busy=false;startBtn.disabled=true;stopBtn.disabled=false;
+    statusText.textContent="카메라 실행 중 · 얼굴을 화면에 비춰 보세요.";
+    resetCoordinates();detectLoop(currentGeneration);
+  }catch(error){
+    if(currentGeneration!==generation)return;
+    console.error(error);stopCamera();
+    statusText.textContent="실행 실패: "+(error.message||error.name);
+    startBtn.disabled=false;
+  }
+}
+async function detectLoop(currentGeneration){
+  if(!running||currentGeneration!==generation||busy)return;
+  busy=true;
+  try{
+    if(video.readyState>=2){
+      const width=video.videoWidth,height=video.videoHeight;
+      if(canvas.width!==width||canvas.height!==height)setCanvasSize();
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      const results=await faceapi.detectAllFaces(video,new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:0.5}));
+      if(!running||currentGeneration!==generation)return;
+      if(results.length>0){
+        const face=results.reduce((largest,item)=>item.box.width*item.box.height>largest.box.width*largest.box.height?item:largest);
+        const box=face.box;
+        const mirroredX=width-box.x-box.width;
+        const centerX=mirroredX+box.width/2,centerY=box.y+box.height/2;
+        const focalLength=FOCAL_LENGTH_AT_640*width/640;
+        const Z=focalLength*FACE_WIDTH_CM/box.width;
+        const X=(centerX-width/2)*Z/focalLength;
+        const Y=(centerY-height/2)*Z/focalLength;
+        const tooClose=box.width/width>WARN_RATIO;
+        const color=tooClose?"#ff3030":"#00ff88";
+        ctx.strokeStyle=color;ctx.lineWidth=Math.max(2,width/320);
+        ctx.strokeRect(mirroredX,box.y,box.width,box.height);
+        const arm=Math.max(12,width*.025);
+        ctx.beginPath();ctx.moveTo(centerX-arm,centerY);ctx.lineTo(centerX+arm,centerY);
+        ctx.moveTo(centerX,centerY-arm);ctx.lineTo(centerX,centerY+arm);ctx.stroke();
+        xText.textContent=`X: ${X.toFixed(1)} cm`;
+        yText.textContent=`Y: ${Y.toFixed(1)} cm`;
+        zText.textContent=`Z: ${Z.toFixed(1)} cm`;
+        warning.textContent=tooClose?"WARNING! TOO CLOSE!":"TARGET LOCKED";
+        warning.style.color=color;
+      }else resetCoordinates();
+    }
+  }catch(error){console.error(error);statusText.textContent="얼굴 검출 중 오류: "+error.message;}
+  finally{
+    busy=false;
+    if(running&&currentGeneration===generation)setTimeout(()=>detectLoop(currentGeneration),40);
+  }
+}
+function stopCamera(){
+  generation++;running=false;busy=false;
+  if(stream){stream.getTracks().forEach(track=>track.stop());stream=null;}
+  video.pause();video.srcObject=null;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  startBtn.disabled=false;stopBtn.disabled=true;
+  resetCoordinates();warning.textContent="SYSTEM STOPPED";
+  statusText.textContent="카메라가 종료되었습니다.";
+}
+startBtn.addEventListener("click",startCamera);
+stopBtn.addEventListener("click",stopCamera);
+window.addEventListener("pagehide",stopCamera);
+</script>
+</body>
+</html>
